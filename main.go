@@ -3,19 +3,22 @@ package main
 import (
 	"fmt"
 	"log"
+	"strconv"
+
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/ssh"
 	"github.com/charmbracelet/wish"
 	"github.com/charmbracelet/wish/bubbletea"
-	"github.com/charmbracelet/ssh"
 
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/charmbracelet/wish/activeterm"
 	"github.com/charmbracelet/wish/logging"
 
+	"database/sql"
 	_ "embed"
 	"strings"
-	"database/sql"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -34,21 +37,21 @@ var (
 	colGreen   = lipgloss.AdaptiveColor{Light: "#40a02b", Dark: "#a6e3a1"}
 )
 
-type model struct{
-	user string
-	poll Poll
-	cursor int
-	picked string
-	choice int
+type model struct {
+	user          string
+	poll          Poll
+	cursor        int
+	picked        string
+	choice        int
 	width, height int
-	voted bool
+	voted         bool
 
-	banner lipgloss.Style
-	intro lipgloss.Style
-	subtitle lipgloss.Style
-	selected lipgloss.Style
+	banner     lipgloss.Style
+	intro      lipgloss.Style
+	subtitle   lipgloss.Style
+	selected   lipgloss.Style
 	unselected lipgloss.Style
-	normal lipgloss.Style
+	normal     lipgloss.Style
 }
 
 func (m model) Init() tea.Cmd {
@@ -57,35 +60,36 @@ func (m model) Init() tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-		case tea.KeyMsg:
-			switch msg.String() {
-				case "q", "ctrl+c":
-					return m, tea.Quit
-				case "up":
-					if m.cursor > 0 {
-						m.cursor--
-					}
-				case "down":
-					if m.cursor < len(m.poll.Choices)-1 {
-						m.cursor++
-					}
-				case "enter":
-					if m.voted {
-						break;
-					}
-
-					m.picked = m.poll.Choices[m.cursor]
-					m.choice = m.cursor
-					_, err := db.Exec(`INSERT INTO votes (day, voter, choice) VALUES (?, ?, ?)`, getDayIndex(), m.user, m.picked)
-
-					if err != nil {
-						log.Println("vote insert error: ", err)
-					}
-
-					m.voted = true;
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "q", "ctrl+c":
+			return m, tea.Quit
+		case "up":
+			if m.cursor > 0 {
+				m.cursor--
 			}
-		case tea.WindowSizeMsg:
-			m.width, m.height = msg.Width, msg.Height
+		case "down":
+			if m.cursor < len(m.poll.Choices)-1 {
+				m.cursor++
+			}
+		case "enter":
+			if m.voted {
+				break
+			}
+
+			m.picked = m.poll.Choices[m.cursor]
+			m.choice = m.cursor
+			log.Println("insert", getDayNum(), m.user)
+			_, err := db.Exec(`INSERT INTO votes (day, voter, choice) VALUES (?, ?, ?)`, getDayNum(), m.user, m.choice)
+
+			if err != nil {
+				log.Println("vote insert error: ", err)
+			}
+
+			m.voted = true
+		}
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
 	}
 	return m, nil
 }
@@ -101,15 +105,15 @@ func (m model) View() string {
 func ViewMainPage(m model) string {
 	s := m.banner.Render(banner) + "\n"
 	s += m.intro.Render(fmt.Sprintf("> Welcome, %s", strings.ToUpper(m.user))) + "\n"
-	s += m.subtitle.Render(fmt.Sprintf("- A new question every day. Vote, then see the results!")) + "\n"
+	s += m.subtitle.Render("- A new question every day. Vote, then see the results!") + "\n"
 	s += "──────────────────────────────────────────────────────────" + "\n\n"
 
 	s += fmt.Sprintf("Today's Poll: \"%s\"\n", m.poll.Question)
 
 	for i, c := range m.poll.Choices {
 		if i == m.cursor {
-			s += m.selected.Render("> " + c) + "\n"
-		}else {
+			s += m.selected.Render("> "+c) + "\n"
+		} else {
 			s += "  " + m.unselected.Render(c) + "\n"
 		}
 	}
@@ -117,12 +121,10 @@ func ViewMainPage(m model) string {
 	s += "\n"
 
 	if m.picked != "" {
-		s += m.normal.Render("You picked: " + m.picked) + "\n\n"
+		s += m.normal.Render("You picked: "+m.picked) + "\n\n"
 	}
 
 	s += m.normal.Render("Help || q quit · h poll history · ↑/↓ move · enter select")
-
-	log.Println(s)
 
 	// left align the whole block
 	block := lipgloss.NewStyle().Align(lipgloss.Left).Render(s)
@@ -134,28 +136,41 @@ func ViewMainPage(m model) string {
 func ViewResults(m model) string {
 	s := m.banner.Render(banner) + "\n"
 	s += m.intro.Render(fmt.Sprintf("> Well here are today's results, %s", strings.ToUpper(m.user))) + "\n"
-	s += m.subtitle.Render(fmt.Sprintf("- You can't go back to change your vote! (This poll is still pretty unserious since it only remembers usernames)")) + "\n"
+	s += m.subtitle.Render("- You can't go back to change your vote!") + "\n"
 	s += "──────────────────────────────────────────────────────────" + "\n\n"
 
 	s += fmt.Sprintf("Today's Poll: \"%s\"\n", m.poll.Question)
 
+	var numVotes int
+	var totalVotes = getTotalVotes()
 	for i, c := range m.poll.Choices {
-		if i == m.cursor {
-			s += m.selected.Render(c + " | ") + "\n"
-		}else {
-			s += m.unselected.Render(c + " | " + "HHHHHHHHHH") + "\n"
+		err := db.QueryRow(
+			"SELECT COUNT(*) FROM votes WHERE day = ? AND choice = ? GROUP BY choice",
+			getDayNum(), i).Scan(&numVotes)
+
+		if err == sql.ErrNoRows {
+			numVotes = 0
+		} else if err != nil {
+			log.Println("vote results lookup failed: ", err)
 		}
+
+		percentVotes := (numVotes * 100) / totalVotes
+
+		if i == m.cursor {
+			s += m.selected.Render(" "+strconv.Itoa(percentVotes)+"% | "+c+" | "+strconv.Itoa(numVotes)) + "\n"
+		} else {
+			s += m.unselected.Render(" "+strconv.Itoa(percentVotes)+"% | "+c) + "\n"
+		}
+
 	}
 
 	s += "\n"
 
 	if m.picked != "" {
-		s += m.normal.Render("Your pick was: " + m.picked) + "\n\n"
+		s += m.normal.Render("Your pick was: "+m.picked) + "\n\n"
 	}
 
-	s += m.normal.Render("Help || q quit · h poll history · ↑/↓ move")
-
-	log.Println(s)
+	s += m.normal.Render("Help || q quit · ↑/↓ move")
 
 	// left align the whole block
 	block := lipgloss.NewStyle().Align(lipgloss.Left).Render(s)
@@ -173,28 +188,46 @@ func teaHandler(s ssh.Session) (tea.Model, []tea.ProgramOption) {
 		banner: r.NewStyle().Bold(true).
 			Foreground(colPink).
 			Padding(1, 13),
-		intro: r.NewStyle().Bold(true).Foreground(colText),
-		subtitle: r.NewStyle().Bold(true).Foreground(colSubtext),
-		selected: r.NewStyle().Foreground(colMauve),
+		intro:      r.NewStyle().Bold(true).Foreground(colText),
+		subtitle:   r.NewStyle().Bold(true).Foreground(colSubtext),
+		selected:   r.NewStyle().Foreground(colMauve),
 		unselected: r.NewStyle().Foreground(colOverlay),
-		normal: r.NewStyle().Faint(true).Foreground(colOverlay),
+		normal:     r.NewStyle().Faint(true).Foreground(colOverlay),
 	}
 
 	// previous vote?
 	if choice, ok := hasExistingVote(m.user); ok {
-		m.choice = choice;
+		m.choice = choice
 		m.picked = m.poll.Choices[choice]
-		m.voted = true;
+		m.voted = true
 	}
 
 	return m, []tea.ProgramOption{tea.WithAltScreen()}
 }
 
+func getTotalVotes() int {
+	var totalVotes int
+
+	err := db.QueryRow(
+		"SELECT COUNT(*) FROM votes WHERE day = ?",
+		getDayNum()).Scan(&totalVotes)
+
+	if err != nil {
+		log.Println("total vote lookup failed: ", err)
+		return 0
+	}
+
+	return totalVotes
+}
+
 func hasExistingVote(user string) (int, bool) {
 	var choice int
+
+	log.Println("lookup", getDayNum(), user)
+
 	err := db.QueryRow(
 		`SELECT choice FROM votes WHERE day = ? AND voter = ?`,
-		getDayIndex(), user,).Scan(&choice)
+		getDayNum(), user).Scan(&choice)
 
 	// No prior vote found
 	if err == sql.ErrNoRows {
@@ -212,7 +245,16 @@ func hasExistingVote(user string) (int, bool) {
 func main() {
 	var err error
 	db, err = sql.Open("sqlite", "polls.db")
-	
+
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS votes (
+			day INTEGER NOT NULL,
+			voter TEXT NOT NULL,
+			choice INTEGER NOT NULL,
+			UNIQUE(day, voter)
+		)
+	`)
+
 	if err != nil {
 		log.Fatal(err)
 	}
