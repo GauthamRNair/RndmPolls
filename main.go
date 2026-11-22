@@ -124,7 +124,7 @@ func ViewMainPage(m model) string {
 		s += m.normal.Render("You picked: "+m.picked) + "\n\n"
 	}
 
-	s += m.normal.Render("Help || q quit · h poll history · ↑/↓ move · enter select")
+	s += m.normal.Render("Help || q quit · ↑/↓ move · enter select")
 
 	// left align the whole block
 	block := lipgloss.NewStyle().Align(lipgloss.Left).Render(s)
