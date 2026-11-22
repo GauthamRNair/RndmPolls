@@ -12,17 +12,42 @@ import (
 
 	"github.com/charmbracelet/wish/activeterm"
 	"github.com/charmbracelet/wish/logging"
+
+	_ "embed"
+	"strings"
+	"database/sql"
+	_ "modernc.org/sqlite"
+)
+
+//go:embed banner.txt
+var banner string
+
+var db *sql.DB
+
+var (
+	colPink    = lipgloss.AdaptiveColor{Light: "#ea76cb", Dark: "#f5c2e7"}
+	colMauve   = lipgloss.AdaptiveColor{Light: "#8839ef", Dark: "#cba6f7"}
+	colText    = lipgloss.AdaptiveColor{Light: "#4c4f69", Dark: "#cdd6f4"}
+	colSubtext = lipgloss.AdaptiveColor{Light: "#6c6f85", Dark: "#a6adc8"}
+	colOverlay = lipgloss.AdaptiveColor{Light: "#9ca0b0", Dark: "#6c7086"}
+	colPeach   = lipgloss.AdaptiveColor{Light: "#fe640b", Dark: "#fab387"}
+	colGreen   = lipgloss.AdaptiveColor{Light: "#40a02b", Dark: "#a6e3a1"}
 )
 
 type model struct{
 	user string
-	choices []string
+	poll Poll
 	cursor int
 	picked string
+	choice int
 	width, height int
+	voted bool
 
-	title lipgloss.Style
+	banner lipgloss.Style
+	intro lipgloss.Style
+	subtitle lipgloss.Style
 	selected lipgloss.Style
+	unselected lipgloss.Style
 	normal lipgloss.Style
 }
 
@@ -41,11 +66,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.cursor--
 					}
 				case "down":
-					if m.cursor < len(m.choices)-1 {
+					if m.cursor < len(m.poll.Choices)-1 {
 						m.cursor++
 					}
 				case "enter":
-					m.picked = m.choices[m.cursor]
+					if m.voted {
+						break;
+					}
+
+					m.picked = m.poll.Choices[m.cursor]
+					m.choice = m.cursor
+					_, err := db.Exec(`INSERT INTO votes (day, voter, choice) VALUES (?, ?, ?)`, getDayIndex(), m.user, m.picked)
+
+					if err != nil {
+						log.Println("vote insert error: ", err)
+					}
+
+					m.voted = true;
 			}
 		case tea.WindowSizeMsg:
 			m.width, m.height = msg.Width, msg.Height
@@ -54,24 +91,77 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
-	s := m.title.Render(fmt.Sprintf("Hello %s!", m.user)) + "\n\n"
+	if !m.voted {
+		return ViewMainPage(m)
+	} else {
+		return ViewResults(m)
+	}
+}
 
-	for i, c := range m.choices {
+func ViewMainPage(m model) string {
+	s := m.banner.Render(banner) + "\n"
+	s += m.intro.Render(fmt.Sprintf("> Welcome, %s", strings.ToUpper(m.user))) + "\n"
+	s += m.subtitle.Render(fmt.Sprintf("- A new question every day. Vote, then see the results!")) + "\n"
+	s += "──────────────────────────────────────────────────────────" + "\n\n"
+
+	s += fmt.Sprintf("Today's Poll: \"%s\"\n", m.poll.Question)
+
+	for i, c := range m.poll.Choices {
 		if i == m.cursor {
-			s += "> " + m.selected.Render(c) + "\n"
+			s += m.selected.Render("> " + c) + "\n"
 		}else {
-			s += m.normal.Render("  " + c) + "\n"
+			s += "  " + m.unselected.Render(c) + "\n"
 		}
 	}
 
+	s += "\n"
+
 	if m.picked != "" {
-		s += m.normal.Render("\nYou picked: " + m.picked) + "\n"
+		s += m.normal.Render("You picked: " + m.picked) + "\n\n"
 	}
 
-	s += m.normal.Render("\n↑/↓ move · q quit")
+	s += m.normal.Render("Help || q quit · h poll history · ↑/↓ move · enter select")
+
+	log.Println(s)
+
+	// left align the whole block
+	block := lipgloss.NewStyle().Align(lipgloss.Left).Render(s)
 
 	// lipgloss auto handles the new sizes
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, s)
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, block)
+}
+
+func ViewResults(m model) string {
+	s := m.banner.Render(banner) + "\n"
+	s += m.intro.Render(fmt.Sprintf("> Well here are today's results, %s", strings.ToUpper(m.user))) + "\n"
+	s += m.subtitle.Render(fmt.Sprintf("- You can't go back to change your vote! (This poll is still pretty unserious since it only remembers usernames)")) + "\n"
+	s += "──────────────────────────────────────────────────────────" + "\n\n"
+
+	s += fmt.Sprintf("Today's Poll: \"%s\"\n", m.poll.Question)
+
+	for i, c := range m.poll.Choices {
+		if i == m.cursor {
+			s += m.selected.Render(c + " | ") + "\n"
+		}else {
+			s += m.unselected.Render(c + " | " + "HHHHHHHHHH") + "\n"
+		}
+	}
+
+	s += "\n"
+
+	if m.picked != "" {
+		s += m.normal.Render("Your pick was: " + m.picked) + "\n\n"
+	}
+
+	s += m.normal.Render("Help || q quit · h poll history · ↑/↓ move")
+
+	log.Println(s)
+
+	// left align the whole block
+	block := lipgloss.NewStyle().Align(lipgloss.Left).Render(s)
+
+	// lipgloss auto handles the new sizes
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, block)
 }
 
 func teaHandler(s ssh.Session) (tea.Model, []tea.ProgramOption) {
@@ -79,15 +169,54 @@ func teaHandler(s ssh.Session) (tea.Model, []tea.ProgramOption) {
 
 	m := model{
 		user: s.User(),
-		choices: []string{"Coffee", "Tea", "Water"},
-		title: r.NewStyle().Bold(true).Foreground(lipgloss.Color("205")),
-		selected: r.NewStyle().Foreground(lipgloss.Color("212")),
-		normal: r.NewStyle().Faint(true),
+		poll: todayPoll(),
+		banner: r.NewStyle().Bold(true).
+			Foreground(colPink).
+			Padding(1, 13),
+		intro: r.NewStyle().Bold(true).Foreground(colText),
+		subtitle: r.NewStyle().Bold(true).Foreground(colSubtext),
+		selected: r.NewStyle().Foreground(colMauve),
+		unselected: r.NewStyle().Foreground(colOverlay),
+		normal: r.NewStyle().Faint(true).Foreground(colOverlay),
 	}
+
+	// previous vote?
+	if choice, ok := hasExistingVote(m.user); ok {
+		m.choice = choice;
+		m.picked = m.poll.Choices[choice]
+		m.voted = true;
+	}
+
 	return m, []tea.ProgramOption{tea.WithAltScreen()}
 }
 
+func hasExistingVote(user string) (int, bool) {
+	var choice int
+	err := db.QueryRow(
+		`SELECT choice FROM votes WHERE day = ? AND voter = ?`,
+		getDayIndex(), user,).Scan(&choice)
+
+	// No prior vote found
+	if err == sql.ErrNoRows {
+		return 0, false
+	}
+
+	if err != nil {
+		log.Println("vote lookup failed: ", err)
+		return 0, false
+	}
+
+	return choice, true
+}
+
 func main() {
+	var err error
+	db, err = sql.Open("sqlite", "polls.db")
+	
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	s, err := wish.NewServer(
 		wish.WithAddress(":2222"),
 		wish.WithHostKeyPath(".ssh/wish_ed25519"),
